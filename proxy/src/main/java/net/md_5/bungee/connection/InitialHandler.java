@@ -7,6 +7,7 @@ import java.net.InetSocketAddress;
 import java.net.URLEncoder;
 import java.security.MessageDigest;
 import java.util.ArrayList;
+import java.util.Iterator;
 import java.util.List;
 import java.util.UUID;
 import java.util.logging.Level;
@@ -17,6 +18,7 @@ import java.util.concurrent.TimeUnit;
 import lombok.Getter;
 import lombok.RequiredArgsConstructor;
 import net.md_5.bungee.*;
+import net.md_5.bungee.api.AnimatedServerPing;
 import net.md_5.bungee.api.Callback;
 import net.md_5.bungee.api.ChatColor;
 import net.md_5.bungee.api.Favicon;
@@ -96,6 +98,7 @@ public class InitialHandler extends PacketHandler implements PendingConnection
     private boolean legacy;
     @Getter
     private boolean fmlMarker;
+    private boolean disconnectAfterPing = true;
 
     private enum State
     {
@@ -194,7 +197,7 @@ public class InitialHandler extends PacketHandler implements PendingConnection
         ServerInfo forced = AbstractReconnectHandler.getForcedHost( this );
         final String motd = ( forced != null ) ? forced.getMotd() : listener.getMotd();
 
-        Callback<ServerPing> pingBack = new Callback<ServerPing>()
+        final Callback<ServerPing> pingBack = new Callback<ServerPing>()
         {
             @Override
             public void done(ServerPing result, Throwable error)
@@ -213,7 +216,29 @@ public class InitialHandler extends PacketHandler implements PendingConnection
                     {
                         BungeeCord.getInstance().getConnectionThrottle().unthrottle( getAddress().getAddress() );
                         Gson gson = handshake.getProtocolVersion() == ProtocolConstants.MINECRAFT_1_7_2 ? BungeeCord.getInstance().gsonLegacy : BungeeCord.getInstance().gson;
-                        unsafe.sendPacket( new StatusResponse( gson.toJson( pingResult.getResponse() ) ) );
+
+                        ServerPing pingResponse = pingResult.getResponse();
+                        if ( pingResponse instanceof AnimatedServerPing )
+                        {
+                            AnimatedServerPing animatedServerPing = (AnimatedServerPing) pingResponse;
+                            disconnectAfterPing = false;
+
+                            // Schedule delayed disconnect
+                            ch.getHandle().eventLoop().schedule( new Runnable()
+                            {
+                                @Override
+                                public void run()
+                                {
+                                    disconnect( "" );
+                                }
+                            }, animatedServerPing.getCompleteAnimationTime(), TimeUnit.MILLISECONDS );
+
+                            // Display the animated Ping
+                            displayAnimatedPing( animatedServerPing );
+                        } else
+                        {
+                            unsafe.sendPacket( new StatusResponse( gson.toJson( pingResponse ) ) );
+                        }
                     }
                 };
 
@@ -237,12 +262,34 @@ public class InitialHandler extends PacketHandler implements PendingConnection
         thisState = State.PING;
     }
 
+    private void displayAnimatedPing(final AnimatedServerPing animatedServerPing)
+    {
+        if (animatedServerPing.getIterator().hasNext())
+        {
+            AnimatedServerPing.AnimationFrame animationFrame = animatedServerPing.getIterator().next();
+            Gson gson = handshake.getProtocolVersion() == ProtocolConstants.MINECRAFT_1_7_2 ? BungeeCord.getInstance().gsonLegacy : BungeeCord.getInstance().gson;
+            unsafe().sendPacket( new StatusResponse( gson.toJson( animationFrame.getPing() ) ) );
+
+            ch.getHandle().eventLoop().schedule( new Runnable()
+            {
+                @Override
+                public void run()
+                {
+                    displayAnimatedPing( animatedServerPing );
+                }
+            }, animationFrame.getStayTime(), TimeUnit.MILLISECONDS );
+        }
+    }
+
     @Override
     public void handle(PingPacket ping) throws Exception
     {
         Preconditions.checkState( thisState == State.PING, "Not expecting PING" );
         unsafe.sendPacket( ping );
-        disconnect( "" );
+        if (disconnectAfterPing)
+        {
+            disconnect( "" );
+        }
     }
 
     @Override
